@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from typing import List, Optional
 from enum import IntEnum
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import os
 import time
