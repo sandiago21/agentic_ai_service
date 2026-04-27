@@ -11,6 +11,7 @@
 - Asyncio
 - Makefile
 - Linting
+- DVC
 
 
 <!-- Build Docker
