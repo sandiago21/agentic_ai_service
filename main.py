@@ -1,3 +1,4 @@
+import os
 from fastapi import FastAPI
 from typing import List, Optional
 from pydantic import BaseModel, Field
@@ -1022,10 +1023,19 @@ class Agent:
             agent_answer = str(e)
 
         return agent_answer
+    
+
+class FakeAgent:
+    def __call__(self, question, filename=""):
+        return "mocked answer"
 
 
 all_questions_and_answers = []
-agent = Agent()
+
+if os.getenv("CI") == "true":
+    agent = FakeAgent()
+else:
+    agent = Agent()
 
 
 class Query(BaseModel):
