@@ -65,7 +65,7 @@ jobs:
           docker run -d -p 8000:8000 -e CI=true --name app fastapi-app
 
       - name: Wait for app to start
-        run: sleep 30
+        run: sleep 150
 
       - name: Test API docs endpoint
         run: curl --fail http://localhost:8000/docs
