@@ -62,7 +62,7 @@ jobs:
 
       - name: Run container
         run: |
-          docker run -d -p 8000:8000 --name app fastapi-app
+          docker run -d -p 8000:8000 -e CI=true --name app fastapi-app
 
       - name: Wait for app to start
         run: sleep 30
