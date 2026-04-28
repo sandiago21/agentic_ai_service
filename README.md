@@ -11,6 +11,7 @@
 - Makefile
 - Linting
 - DVC
+- Evaluation
 
 
 <!-- Build Docker

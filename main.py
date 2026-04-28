@@ -1,4 +1,6 @@
 import os
+import time
+import asyncio
 from fastapi import FastAPI
 from typing import List, Optional
 from pydantic import BaseModel, Field
@@ -23,6 +25,8 @@ from sklearn.metrics.pairwise import cosine_similarity
 from youtube_transcript_api import YouTubeTranscriptApi
 # from langchain.agents import create_tool_calling_agent
 
+
+start_time = time.time()
 
 api = FastAPI()
 
@@ -314,6 +318,9 @@ def visit_webpage_wiki(url: str) -> str:
 
     soup = BeautifulSoup(response.text, "html.parser")
 
+    return soup
+
+def process_webpage_wiki(soup):
     # Remove scripts/styles
     for tag in soup(["script", "style"]):
         tag.extract()
@@ -353,6 +360,9 @@ def visit_webpage_main(url: str):
 
     soup = BeautifulSoup(response.text, "html.parser")
 
+    return soup
+
+def process_webpage_main(soup):
     # Remove scripts/styles
     for tag in soup(["script", "style"]):
         tag.extract()
@@ -717,7 +727,7 @@ def tool_executor(state: AgentState):
     responsible for translating structured LLM intent into real system actions.
     """
 
-    final_webpage_results = []
+    final_webpage_results = {"main": [], "wiki": []}
 
     try:
         action = Action.model_validate(state["proposed_action"])
@@ -749,15 +759,13 @@ def tool_executor(state: AgentState):
 
             for result in results:
                 try:
-                    webpage_results = visit_webpage_wiki(result)
-                    webpage_result = " \n ".join(webpage_results)
+                    webpage_result = visit_webpage_wiki(result)
 
-                    final_webpage_results.append(webpage_result)
+                    final_webpage_results["wiki"].append(webpage_result)
 
-                    webpage_results = visit_webpage_main(result)
-                    webpage_result = " \n ".join(webpage_results)
+                    webpage_result = visit_webpage_main(result)
 
-                    final_webpage_results.append(webpage_result)
+                    final_webpage_results["main"].append(webpage_result)
 
                 except Exception as e:
                     webpage_information_complete = str(e)
@@ -816,33 +824,43 @@ def RAG(state: AgentState):
             state["messages"][-1].content
         ).reshape(1, -1)
 
-        for webpage_result in state["webpage_results"]:
-            webpage_information_embeddings = (
-                sentence_transformer_model.encode_query(webpage_result).reshape(
-                    1, -1
+        for category in ["wiki", "main"]:
+            category_webpage_soups = state["webpage_results"][category]
+
+            for category_webpage_soup in category_webpage_soups:
+                if category == "wiki":
+                    webpage_results = process_webpage_wiki(category_webpage_soup)
+                elif category == "main":
+                    webpage_results = process_webpage_main(category_webpage_soup)
+
+                webpage_result = " \n ".join(webpage_results)
+
+                webpage_information_embeddings = (
+                    sentence_transformer_model.encode_query(webpage_result).reshape(
+                        1, -1
+                    )
                 )
-            )
-            query_webpage_information_similarity_score = float(
-                cosine_similarity(
-                    query_embeddings, webpage_information_embeddings
-                )[0][0]
-            )
+                query_webpage_information_similarity_score = float(
+                    cosine_similarity(
+                        query_embeddings, webpage_information_embeddings
+                    )[0][0]
+                )
 
-            # logger.info(f"Webpage Information and Similarity Score: {result} - {webpage_result} - {query_webpage_information_similarity_score}")
+                # logger.info(f"Webpage Information and Similarity Score: {result} - {webpage_result} - {query_webpage_information_similarity_score}")
 
-            if query_webpage_information_similarity_score > 0.65:
-                webpage_information_complete += webpage_result
-                webpage_information_complete += " \n "
-                webpage_information_complete += " \n "
+                if query_webpage_information_similarity_score > 0.65:
+                    webpage_information_complete += webpage_result
+                    webpage_information_complete += " \n "
+                    webpage_information_complete += " \n "
 
-            if (
-                query_webpage_information_similarity_score
-                > best_query_webpage_information_similarity_score
-            ):
-                best_query_webpage_information_similarity_score = (
+                if (
                     query_webpage_information_similarity_score
-                )
-                best_webpage_information = webpage_result
+                    > best_query_webpage_information_similarity_score
+                ):
+                    best_query_webpage_information_similarity_score = (
+                        query_webpage_information_similarity_score
+                    )
+                    best_webpage_information = webpage_result
 
         if (
             webpage_information_complete == ""
@@ -987,3 +1005,7 @@ if __name__ == "__main__":
             "agent_answer": agent_answer,
         }
     )
+
+    end_time = time.time()
+
+    print(end_time - start_time)
