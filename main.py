@@ -1,5 +1,6 @@
 import os
 import time
+import httpx
 import asyncio
 from fastapi import FastAPI
 from typing import List, Optional
@@ -50,6 +51,7 @@ class Config(object):
         self.repetition_penalty = 1.2
         self.DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
         self.model_name = "Qwen/Qwen2.5-7B-Instruct"
+        self.DOWNLOAD_LIMIT = 2
         # self.reasoning_model_name = "mistralai/Mistral-7B-Instruct-v0.2"
         # self.reasoning_model_name = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
         # self.reasoning_model_name = "Qwen/Qwen2.5-7B-Instruct"
@@ -137,7 +139,7 @@ class AgentState(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
     proposed_action: str
     information: str
-    webpage_results: List[str]
+    webpage_results: dict
     raw_output: str
     output: str
     confidence: float
@@ -155,172 +157,27 @@ ALLOWED_TOOLS = {
 }
 
 
-def visit_webpage(url: str) -> str:
-    """
-    Fetch and read the content of a webpage.
-    Args:
-        url: URL of the webpage
-    Returns:
-        Extracted readable text (truncated)
-    """
+async def visit_webpage_wiki(
+        client: httpx.AsyncClient,
+        url: str,
+        semaphore: asyncio.Semaphore,
+    ) -> str:
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
-    }
+    async with semaphore:
+        try:
+            response = await client.get(url, timeout=10, follow_redirects=True)
+            response.raise_for_status()
 
-    response = requests.get(url, headers=headers, timeout=10)
-    response.raise_for_status()
+            soup = BeautifulSoup(response.text, "html.parser")
 
-    soup = BeautifulSoup(response.text, "html.parser")
+            return soup
+        
+        except Exception as e:
+            # soup = BeautifulSoup(str(e), "html.parser")
 
-    paragraphs = [p.get_text() for p in soup.find_all("p")]
-    text = "\n".join(paragraphs)
+            return None
 
-    return (text[:500], text[500:1000])
-
-
-def visit_webpage(url: str) -> str:
-    headers = {"User-Agent": "Mozilla/5.0"}
-
-    response = requests.get(url, headers=headers, timeout=10)
-    response.raise_for_status()
-
-    soup = BeautifulSoup(response.text, "html.parser")
-
-    # Remove scripts/styles
-    for tag in soup(["script", "style"]):
-        tag.extract()
-
-    # Extract more elements (not just <p>)
-    elements = soup.find_all(["p", "dd"])
-
-    text = " \n ".join(el.get_text(strip=False) for el in elements)
-
-    return (text[:1000],)
-
-
-def visit_webpage(url: str) -> str:
-    headers = {"User-Agent": "Mozilla/5.0"}
-
-    response = requests.get(url, headers=headers, timeout=10)
-    response.raise_for_status()
-
-    soup = BeautifulSoup(response.text, "html.parser")
-
-    # Remove scripts/styles
-    for tag in soup(["script", "style"]):
-        tag.extract()
-
-    content = soup.find("div", {"id": "mw-content-text"})
-
-    texts = []
-
-    # 1. Paragraphs
-    for p in content.find_all("p"):
-        texts.append(p.get_text(strip=False))
-
-    # 2. Definition lists
-    for dd in content.find_all("dd"):
-        texts.append(dd.get_text(strip=False))
-
-    # 3. Tables (IMPORTANT)
-    for table in content.find_all("table", {"class": "wikitable"}):
-        for row in table.find_all("tr"):
-            cols = [c.get_text(strip=True) for c in row.find_all(["td", "th"])]
-            if cols:
-                texts.append(" | ".join(cols))
-
-    return (" \n ".join(texts)[:1000],)
-
-
-def visit_webpage(url: str) -> str:
-    headers = {"User-Agent": "Mozilla/5.0"}
-
-    response = requests.get(url, headers=headers, timeout=10)
-    response.raise_for_status()
-
-    soup = BeautifulSoup(response.text, "html.parser")
-
-    # Remove scripts/styles
-    for tag in soup(["script", "style"]):
-        tag.extract()
-
-    content = soup.find("div", {"id": "mw-content-text"})
-
-    # Extract more elements (not just <p>)
-    elements = soup.find_all(["p", "dd"])
-
-    main_text = " \n ".join(el.get_text(strip=False) for el in elements)
-
-    # 3. Tables (IMPORTANT)
-    table_texts = []
-    for table in content.find_all("table", {"class": "wikitable"}):
-        for row in table.find_all("tr"):
-            cols = [c.get_text(strip=True) for c in row.find_all(["td", "th"])]
-            if cols:
-                table_texts.append(" | ".join(cols))
-
-    if len(table_texts) > 0:
-        return [
-            main_text[:1000],
-            " \n ".join(table_texts),
-        ]
-    else:
-        return [
-            main_text[:1000],
-        ]
-
-
-def visit_webpage(url: str) -> str:
-    headers = {"User-Agent": "Mozilla/5.0"}
-
-    response = requests.get(url, headers=headers, timeout=10)
-    response.raise_for_status()
-
-    soup = BeautifulSoup(response.text, "html.parser")
-
-    # Remove scripts/styles
-    for tag in soup(["script", "style"]):
-        tag.extract()
-
-    content = soup.find("div", {"id": "mw-content-text"})
-
-    # Extract more elements (not just <p>)
-    elements = soup.find_all(["p", "dd"])
-
-    main_text = " \n ".join(el.get_text(strip=False) for el in elements)
-
-    # 3. Tables (IMPORTANT)
-    table_texts = []
-    if content is not None:
-        for table in content.find_all("table", {"class": "wikitable"}):
-            for row in table.find_all("tr"):
-                cols = [c.get_text(strip=True) for c in row.find_all(["td", "th"])]
-                if cols:
-                    table_texts.append(" | ".join(cols))
-
-    if len(table_texts) > 0:
-        return [
-            main_text[:1000],
-            " \n ".join(table_texts),
-        ]
-    else:
-        return [
-            main_text[:1000],
-        ]
-
-
-def visit_webpage_wiki(url: str) -> str:
-    headers = {"User-Agent": "Mozilla/5.0"}
-
-    response = requests.get(url, headers=headers, timeout=10)
-    response.raise_for_status()
-
-    soup = BeautifulSoup(response.text, "html.parser")
-
-    return soup
-
-def process_webpage_wiki(soup):
+async def process_webpage_wiki(soup):
     # Remove scripts/styles
     for tag in soup(["script", "style"]):
         tag.extract()
@@ -352,17 +209,28 @@ def process_webpage_wiki(soup):
         ]
 
 
-def visit_webpage_main(url: str):
-    headers = {"User-Agent": "Mozilla/5.0"}
+async def visit_webpage_main(
+        client: httpx.AsyncClient,
+        url: str,
+        semaphore: asyncio.Semaphore,
+    ):
 
-    response = requests.get(url, headers=headers, timeout=10)
-    response.raise_for_status()
+    async with semaphore:
+        try:
+            response = await client.get(url, timeout=10, follow_redirects=True)
+            response.raise_for_status()
 
-    soup = BeautifulSoup(response.text, "html.parser")
+            soup = BeautifulSoup(response.text, "html.parser")
 
-    return soup
+            return soup
+        
+        except Exception as e:
+            # soup = BeautifulSoup(str(e), "html.parser")
 
-def process_webpage_main(soup):
+            return None
+
+
+async def process_webpage_main(soup):
     # Remove scripts/styles
     for tag in soup(["script", "style"]):
         tag.extract()
@@ -393,6 +261,58 @@ def process_webpage_main(soup):
         return [main_text[:1500], "\n".join(table_texts)[:5000]]
     else:
         return [main_text[:1500]]
+
+
+# def visit_webpage_main(
+#         client: httpx.AsyncClient,
+#         url: str,
+#         semaphore: asyncio.Semaphore,
+#     ):
+
+#     headers = {"User-Agent": "Mozilla/5.0"}
+
+#     response = requests.get(url, headers=headers, timeout=10)
+#     response.raise_for_status()
+
+#     soup = BeautifulSoup(response.text, "html.parser")
+
+#     return soup
+
+
+# def process_webpage_main(soup):
+#     # Remove scripts/styles
+#     for tag in soup(["script", "style"]):
+#         tag.extract()
+
+#     # 🔥 Try to focus on body (fallback if no clear container)
+#     content = soup.find("body")
+
+#     # ✅ Extract broader set of elements
+#     elements = content.find_all(["p", "dd", "td", "div"])
+
+#     texts = []
+#     for el in elements:
+#         text = el.get_text(strip=True)
+#         if text and len(text) > 30:  # filter noise
+#             texts.append(text)
+
+#     main_text = "\n".join(texts)
+
+#     # ✅ Extract all tables (not just wikitable)
+#     table_texts = []
+#     for table in soup.find_all("table"):
+#         for row in table.find_all("tr"):
+#             cols = [c.get_text(strip=True) for c in row.find_all(["td", "th"])]
+#             if cols:
+#                 table_texts.append(" | ".join(cols))
+
+#     if table_texts:
+#         return [main_text[:1500], "\n".join(table_texts)[:5000]]
+#     else:
+#         return [main_text[:1500]]
+
+
+
 
 
 def web_search(query: str, num_results: int = 10):
@@ -595,7 +515,7 @@ Information:
 
     state["output"] = output.strip()
 
-    logger.info(f"State (Safety Agent): {state}")
+    logger.info(f"""State (Safety Agent): {state["information"]}""")
 
     return state
 
@@ -678,7 +598,7 @@ def route(state: AgentState):
         return "allow"
 
 
-def tool_executor(state: AgentState):
+async def tool_executor(state: AgentState):
     """
     Tool execution node for a risk-aware LLM agent.
     This node executes the validated and approved tool call proposed by the
@@ -735,6 +655,7 @@ def tool_executor(state: AgentState):
         webpage_information_complete = ""
 
         if action.tool == "web_search":
+
             logger.info(f"action.tool: {action.tool}")
 
             query_embeddings = sentence_transformer_model.encode_query(
@@ -757,35 +678,44 @@ def tool_executor(state: AgentState):
 
             logger.info(f"Webpages - Results: {results}")
 
-            for result in results:
-                try:
-                    webpage_result = visit_webpage_wiki(result)
+            dl_semaphore = asyncio.Semaphore(config.DOWNLOAD_LIMIT)
+            async with httpx.AsyncClient() as client:
+                async with asyncio.TaskGroup() as tg:
+                    tasks = [
+                        tg.create_task(
+                            visit_webpage_wiki(client, url, dl_semaphore)
+                        )
+                        for url in results
+                    ]
 
-                    final_webpage_results["wiki"].append(webpage_result)
+                final_webpage_results["wiki"] = [task.result() for task in tasks]
 
-                    webpage_result = visit_webpage_main(result)
+                async with asyncio.TaskGroup() as tg:
+                    tasks = [
+                        tg.create_task(
+                            visit_webpage_main(client, url, dl_semaphore)
+                        )
+                        for url in results
+                    ]
 
-                    final_webpage_results["main"].append(webpage_result)
+                final_webpage_results["main"] = [task.result() for task in tasks]
 
-                except Exception as e:
-                    webpage_information_complete = str(e)
-                    logger.info(f"Tool Executor - Exception: {e}")
+
+            # for url in results:
+            #     final_webpage_results["main"].append(process_webpage_main(visit_webpage_main(client, url, dl_semaphore)))
+
 
         elif action.tool == "visit_webpage":
-            try:
-                webpage_results = visit_webpage_wiki(action.args["url"])
-                webpage_result = " \n ".join(webpage_results)
+            webpage_results = visit_webpage_wiki(action.args["url"])
+            webpage_result = " \n ".join(webpage_results)
 
-                final_webpage_results.append(webpage_result)
+            final_webpage_results["wiki"].append(webpage_result)
 
-                webpage_results = visit_webpage_main(action.args["url"])
-                webpage_result = " \n ".join(webpage_results)
+            webpage_results = visit_webpage_main(action.args["url"])
+            webpage_result = " \n ".join(webpage_results)
 
-                final_webpage_results.append(webpage_result)
+            final_webpage_results["main"].append(webpage_result)
 
-            except Exception as e:
-                webpage_information_complete = str(e)
-                pass
         elif "answer" in state["proposed_action"]:
             webpage_information_complete = (
                 f"""answer: {state["proposed_action"]["answer"]}"""
@@ -795,7 +725,7 @@ def tool_executor(state: AgentState):
         state["information"] = webpage_information_complete[:3000]
         state["best_query_webpage_information_similarity_score"] = -1.0
 
-    except:
+    except Exception as e:
         if "answer" in state["proposed_action"]:
             webpage_information_complete = (
                 f"""answer: {state["proposed_action"]["answer"]}"""
@@ -803,7 +733,7 @@ def tool_executor(state: AgentState):
             state["information"] = webpage_information_complete
             state["best_query_webpage_information_similarity_score"] = 1.0
         else:
-            state["information"] = ""
+            state["information"] = str(e)
             state["best_query_webpage_information_similarity_score"] = -1.0
 
     # logger.info(f"Information: {state['information']}")
@@ -814,7 +744,7 @@ def tool_executor(state: AgentState):
     return state
 
 
-def RAG(state: AgentState):
+async def RAG(state: AgentState):
     if state["information"] == "" or True:
         best_webpage_information = ""
         webpage_information_complete = ""
@@ -828,39 +758,40 @@ def RAG(state: AgentState):
             category_webpage_soups = state["webpage_results"][category]
 
             for category_webpage_soup in category_webpage_soups:
-                if category == "wiki":
-                    webpage_results = process_webpage_wiki(category_webpage_soup)
-                elif category == "main":
-                    webpage_results = process_webpage_main(category_webpage_soup)
+                if category_webpage_soup is not None:
+                    if category == "wiki":
+                        webpage_results = await process_webpage_wiki(category_webpage_soup)
+                    elif category == "main":
+                        webpage_results = await process_webpage_main(category_webpage_soup)
 
-                webpage_result = " \n ".join(webpage_results)
+                    webpage_result = " \n ".join(webpage_results)
 
-                webpage_information_embeddings = (
-                    sentence_transformer_model.encode_query(webpage_result).reshape(
-                        1, -1
+                    webpage_information_embeddings = (
+                        sentence_transformer_model.encode_query(webpage_result).reshape(
+                            1, -1
+                        )
                     )
-                )
-                query_webpage_information_similarity_score = float(
-                    cosine_similarity(
-                        query_embeddings, webpage_information_embeddings
-                    )[0][0]
-                )
+                    query_webpage_information_similarity_score = float(
+                        cosine_similarity(
+                            query_embeddings, webpage_information_embeddings
+                        )[0][0]
+                    )
 
-                # logger.info(f"Webpage Information and Similarity Score: {result} - {webpage_result} - {query_webpage_information_similarity_score}")
+                    # logger.info(f"Webpage Information and Similarity Score: {result} - {webpage_result} - {query_webpage_information_similarity_score}")
 
-                if query_webpage_information_similarity_score > 0.65:
-                    webpage_information_complete += webpage_result
-                    webpage_information_complete += " \n "
-                    webpage_information_complete += " \n "
+                    if query_webpage_information_similarity_score > 0.65:
+                        webpage_information_complete += webpage_result
+                        webpage_information_complete += " \n "
+                        webpage_information_complete += " \n "
 
-                if (
-                    query_webpage_information_similarity_score
-                    > best_query_webpage_information_similarity_score
-                ):
-                    best_query_webpage_information_similarity_score = (
+                    if (
                         query_webpage_information_similarity_score
-                    )
-                    best_webpage_information = webpage_result
+                        > best_query_webpage_information_similarity_score
+                    ):
+                        best_query_webpage_information_similarity_score = (
+                            query_webpage_information_similarity_score
+                        )
+                        best_webpage_information = webpage_result
 
         if (
             webpage_information_complete == ""
@@ -911,7 +842,7 @@ class Agent:
         self.safe_app = safe_workflow.compile()
         print("Agent initialized.")
 
-    def __call__(self, question: str, filename: str) -> str:
+    async def __call__(self, question: str, filename: str) -> str:
         state = {
             "messages": question,
         }
@@ -922,7 +853,7 @@ class Agent:
             state["messages"] = state["messages"][::-1]
 
         try:
-            response = self.safe_app.invoke(state)
+            response = await self.safe_app.ainvoke(state)
 
             if "answer: " in response["information"]:
                 response["output"] = (
@@ -980,12 +911,12 @@ def get_queries(first_n: int = None):
 
 
 @api.post("/ask_question")
-def get_answer_to_question(query: Query):
+async def get_answer_to_question(query: Query):
     for question_and_answer in all_questions_and_answers:
         if query.question == question_and_answer.question:
             return question_and_answer.answer
 
-    agent_answer = agent.__call__(query.question, filename=query.filename)
+    agent_answer = await agent.__call__(query.question, filename=query.filename)
     query.answer = agent_answer
 
     all_questions_and_answers.append(query)
@@ -993,11 +924,11 @@ def get_answer_to_question(query: Query):
     return query.answer
 
 
-if __name__ == "__main__":
-    agent = Agent()
+async def main():
     # question = "Who nominated the only Featured Article on English Wikipedia about a dinosaur that was promoted in November 2016?"
     question = "Who won the 2022 world snooker championship?"
-    agent_answer = agent.__call__(question, filename="")
+    # question = "Who are the drivers of the Ferrari F1 team in 2026?"
+    agent_answer = await agent.__call__(question, filename="")
 
     print(
         {
@@ -1009,3 +940,8 @@ if __name__ == "__main__":
     end_time = time.time()
 
     print(end_time - start_time)
+
+
+if __name__ == "__main__":
+    agent = Agent()
+    asyncio.run(main())
