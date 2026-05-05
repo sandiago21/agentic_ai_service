@@ -32,11 +32,6 @@ start_time = time.time()
 
 api = FastAPI()
 
-
-# (Keep Constants as is)
-# --- Constants ---
-DEFAULT_API_URL = "https://agents-course-unit4-scoring.hf.space"
-
 sentence_transformer_model = SentenceTransformer("all-mpnet-base-v2")
 
 logger = logging.getLogger("agent")
@@ -54,6 +49,8 @@ class Config(object):
         self.model_name = "Qwen/Qwen2.5-7B-Instruct"
         self.DOWNLOAD_LIMIT = 2
         self.CPU_WORKERS = min(2, os.cpu_count())
+        self.apply_multithreading = True
+        self.apply_multiprocessing = False
         # self.reasoning_model_name = "mistralai/Mistral-7B-Instruct-v0.2"
         # self.reasoning_model_name = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
         # self.reasoning_model_name = "Qwen/Qwen2.5-7B-Instruct"
@@ -157,6 +154,20 @@ ALLOWED_TOOLS = {
     "web_search": ["query"],
     "visit_webpage": ["url"],
 }
+
+
+def visit_webpage(
+        url: str,
+    ) -> str:
+
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    response = requests.get(url, headers=headers, timeout=10)
+    response.raise_for_status()
+
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    return soup
 
 
 async def visit_webpage_wiki(
@@ -709,31 +720,32 @@ async def tool_executor(state: AgentState):
 
             logger.info(f"Webpages - Results: {results}")
 
-            dl_semaphore = asyncio.Semaphore(config.DOWNLOAD_LIMIT)
-            async with httpx.AsyncClient() as client:
-                async with asyncio.TaskGroup() as tg:
-                    tasks = [
-                        tg.create_task(
-                            visit_webpage_wiki(client, url, dl_semaphore)
-                        )
-                        for url in results
-                    ]
+            if config.apply_multithreading:
+                dl_semaphore = asyncio.Semaphore(config.DOWNLOAD_LIMIT)
+                async with httpx.AsyncClient() as client:
+                    async with asyncio.TaskGroup() as tg:
+                        tasks = [
+                            tg.create_task(
+                                visit_webpage_wiki(client, url, dl_semaphore)
+                            )
+                            for url in results
+                        ]
 
-                final_webpage_results["wiki"] = [task.result() for task in tasks]
+                    final_webpage_results["wiki"] = [task.result() for task in tasks]
 
-                async with asyncio.TaskGroup() as tg:
-                    tasks = [
-                        tg.create_task(
-                            visit_webpage_main(client, url, dl_semaphore)
-                        )
-                        for url in results
-                    ]
+                    async with asyncio.TaskGroup() as tg:
+                        tasks = [
+                            tg.create_task(
+                                visit_webpage_main(client, url, dl_semaphore)
+                            )
+                            for url in results
+                        ]
 
-                final_webpage_results["main"] = [task.result() for task in tasks]
-
-
-            # for url in results:
-            #     final_webpage_results["main"].append(process_webpage_main(visit_webpage_main(client, url, dl_semaphore)))
+                    final_webpage_results["main"] = [task.result() for task in tasks]
+            else:
+                for url in results:
+                    final_webpage_results["wiki"].append(visit_webpage(url))
+                    final_webpage_results["main"].append(visit_webpage(url))
 
 
         elif action.tool == "visit_webpage":
@@ -781,6 +793,8 @@ async def RAG(state: AgentState):
         webpage_information_complete = ""
         best_query_webpage_information_similarity_score = -1.0
 
+        all_webpage_results = []
+
         query_embeddings = sentence_transformer_model.encode_query(
             state["messages"][-1].content
         ).reshape(1, -1)
@@ -795,18 +809,25 @@ async def RAG(state: AgentState):
                 if category_webpage_soup is not None:
                     if category == "wiki":
                         wiki_soups.append(category_webpage_soup)
-                        # webpage_results = await process_webpage_wiki(category_webpage_soup)
+                        if not config.apply_multiprocessing:
+                            webpage_results = process_webpage_wiki(category_webpage_soup)
+                            all_webpage_results.append(webpage_results)
                     elif category == "main":
                         main_soups.append(category_webpage_soup)
-                        # webpage_results = await process_webpage_main(category_webpage_soup)
+                        if not config.apply_multiprocessing:
+                            webpage_results = process_webpage_main(category_webpage_soup)
+                            all_webpage_results.append(webpage_results)
 
-            all_webpage_results_wiki = await process_webpage_wikis(wiki_soups)
-            all_webpage_results_main = await process_webpage_mains(main_soups)
+            if config.apply_multiprocessing:
+                all_webpage_results_wiki = await process_webpage_wikis(wiki_soups)
+                all_webpage_results_main = await process_webpage_mains(main_soups)
 
-            all_webpage_results_wiki = [x[0] for x in all_webpage_results_wiki]
-            all_webpage_results_main = [x[0] for x in all_webpage_results_main]
+                # all_webpage_results_wiki = [x[0] for x in all_webpage_results_wiki]
+                # all_webpage_results_main = [x[0] for x in all_webpage_results_main]
 
-            for webpage_results in all_webpage_results_wiki, all_webpage_results_main:
+                all_webpage_results = all_webpage_results_wiki + all_webpage_results_main
+
+            for webpage_results in all_webpage_results:
 
                 webpage_result = " \n ".join(webpage_results)
 
@@ -969,9 +990,9 @@ async def get_answer_to_question(query: Query):
 
 
 async def main():
-    # question = "Who nominated the only Featured Article on English Wikipedia about a dinosaur that was promoted in November 2016?"
+    question = "Who nominated the only Featured Article on English Wikipedia about a dinosaur that was promoted in November 2016?"
     # question = "Who won the 2022 world snooker championship?"
-    question = "Who are the drivers of the Ferrari F1 team in 2026?"
+    # question = "Who are the drivers of the Ferrari F1 team in 2026?"
     agent_answer = await agent.__call__(question, filename="")
 
     print(
